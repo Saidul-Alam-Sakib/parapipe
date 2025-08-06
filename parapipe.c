@@ -3,6 +3,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <pthread.h>
+#include <fcntl.h>
+#include <sys/wait.h>
+#include <sys/types.h>
+
 
 #define MAX_COMMANDS 20
 
@@ -81,11 +86,48 @@ void *worker_thread(void *arg) {
         }
     }
 
-    // Close all pipe ends in parent
-    for (int i = 0; i < data->command_count - 1; i++) {
+    // PARENT (worker thread)
+
+    // Close unused write ends (except the first pipe's write end)
+    for (int i = 1; i < data->command_count - 1; i++) {
         close(pipes[i][0]);
         close(pipes[i][1]);
     }
+
+    // Set up write-end to first command and read-end from last command
+    int write_fd = pipes[0][1];
+    int read_fd = pipes[data->command_count - 2][0];
+
+    // Set read_fd as non-blocking
+    fcntl(read_fd, F_SETFL, O_NONBLOCK);
+
+    // Read from stdin and feed to first command
+    char buffer[MAX_LINE];
+    while (fgets(buffer, sizeof(buffer), stdin)) {
+        write(write_fd, buffer, strlen(buffer));
+    }
+    close(write_fd);  // Done writing
+
+    // Read output from last command
+    sleep(1); // small wait to allow children to produce output
+
+    char outbuf[MAX_LINE];
+    ssize_t bytes_read;
+
+    while ((bytes_read = read(read_fd, outbuf, sizeof(outbuf) - 1)) > 0) {
+        outbuf[bytes_read] = '\0';
+        printf("[Thread %d Output] %s", data->id, outbuf);  // Replace this with sender logic later
+    }
+
+    close(read_fd);
+
+    // Wait for all child processes
+    for (int i = 0; i < data->command_count; i++) {
+        wait(NULL);
+    }
+
+    pthread_exit(NULL);
+
 
     // Wait for all child processes
     for (int i = 0; i < data->command_count; i++) {
