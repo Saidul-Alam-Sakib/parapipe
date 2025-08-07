@@ -1,4 +1,3 @@
-// parapipe.c - Step 1: Parse arguments and split commands
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -6,16 +5,11 @@
 #include <pthread.h>
 #include <fcntl.h>
 #include <sys/wait.h>
-#include <sys/types.h>
 
+#define MAX_COMMANDS 10
+#define MAX_LINE 4096
 
-#define MAX_COMMANDS 20
-
-void print_usage() {
-    fprintf(stderr, "Usage: ./parapipe -n <num_threads> -c \"command -> command -> ...\"\n");
-}
-
-// Helper to trim whitespace
+// Trim whitespace
 char *trim(char *str) {
     while (*str == ' ') str++;
     char *end = str + strlen(str) - 1;
@@ -23,58 +17,41 @@ char *trim(char *str) {
     return str;
 }
 
-#include <pthread.h>
-#include <fcntl.h>
-#include <sys/wait.h>
-
-#define MAX_LINE 4096
-
-// Shared data structure for each thread
 typedef struct {
     int id;
     int command_count;
     char **commands;
 } ThreadData;
 
-// Worker thread function
 void *worker_thread(void *arg) {
     ThreadData *data = (ThreadData *)arg;
+    int i;
 
-    // Create pipe chain: one pipe between each pair of commands
-    int pipes[data->command_count - 1][2];
-
-    for (int i = 0; i < data->command_count - 1; i++) {
+    // SAFELY DECLARE PIPE ARRAY
+    int **pipes = malloc((data->command_count - 1) * sizeof(int *));
+    for (i = 0; i < data->command_count - 1; i++) {
+        pipes[i] = malloc(2 * sizeof(int));
         if (pipe(pipes[i]) == -1) {
             perror("pipe");
             exit(1);
         }
     }
 
-    for (int i = 0; i < data->command_count; i++) {
+    for (i = 0; i < data->command_count; i++) {
         pid_t pid = fork();
         if (pid == 0) {
-            // CHILD
-            // If not first command, set stdin
-            if (i > 0) {
-                dup2(pipes[i - 1][0], STDIN_FILENO);
-            }
+            if (i > 0) dup2(pipes[i - 1][0], STDIN_FILENO);
+            if (i < data->command_count - 1) dup2(pipes[i][1], STDOUT_FILENO);
 
-            // If not last command, set stdout
-            if (i < data->command_count - 1) {
-                dup2(pipes[i][1], STDOUT_FILENO);
-            }
-
-            // Close all pipe ends in child
             for (int j = 0; j < data->command_count - 1; j++) {
                 close(pipes[j][0]);
                 close(pipes[j][1]);
             }
 
-            // Parse command into argv
-            char *cmd = strdup(data->commands[i]);
+            char *cmd_copy = strdup(data->commands[i]);
             char *argv[100];
             int k = 0;
-            argv[k] = strtok(cmd, " ");
+            argv[k] = strtok(cmd_copy, " ");
             while (argv[k] != NULL && k < 99) {
                 argv[++k] = strtok(NULL, " ");
             }
@@ -86,97 +63,65 @@ void *worker_thread(void *arg) {
         }
     }
 
-    // PARENT (worker thread)
-
-    // Close unused write ends (except the first pipe's write end)
-    for (int i = 1; i < data->command_count - 1; i++) {
+    for (i = 1; i < data->command_count - 1; i++) {
         close(pipes[i][0]);
         close(pipes[i][1]);
     }
 
-    // Set up write-end to first command and read-end from last command
     int write_fd = pipes[0][1];
     int read_fd = pipes[data->command_count - 2][0];
 
-    // Set read_fd as non-blocking
     fcntl(read_fd, F_SETFL, O_NONBLOCK);
 
-    // Read from stdin and feed to first command
-    char buffer[MAX_LINE];
-    while (fgets(buffer, sizeof(buffer), stdin)) {
-        write(write_fd, buffer, strlen(buffer));
-    }
-    close(write_fd);  // Done writing
+    // Simulated input
+    char *lines[] = {
+        "abc def 123\n",
+        "hello abc\n",
+        "xyz abc 123\n",
+        "nothing here\n"
+    };
 
-    // Read output from last command
-    sleep(1); // small wait to allow children to produce output
+    for (i = 0; i < 4; i++) {
+        write(write_fd, lines[i], strlen(lines[i]));
+    }
+    close(write_fd);
+
+    sleep(1);
 
     char outbuf[MAX_LINE];
     ssize_t bytes_read;
-
     while ((bytes_read = read(read_fd, outbuf, sizeof(outbuf) - 1)) > 0) {
         outbuf[bytes_read] = '\0';
-        printf("[Thread %d Output] %s", data->id, outbuf);  // Replace this with sender logic later
+        printf("[Thread %d Output] %s", data->id, outbuf);
     }
 
     close(read_fd);
 
-    // Wait for all child processes
-    for (int i = 0; i < data->command_count; i++) {
+    for (i = 0; i < data->command_count; i++) {
         wait(NULL);
     }
 
-    pthread_exit(NULL);
-
-
-    // Wait for all child processes
-    for (int i = 0; i < data->command_count; i++) {
-        wait(NULL);
+    // CLEAN UP
+    for (i = 0; i < data->command_count - 1; i++) {
+        free(pipes[i]);
     }
+    free(pipes);
 
     pthread_exit(NULL);
 }
 
+int main() {
+    int num_threads = 2;
+    char *command_string = strdup("grep abc -> grep 123");
 
-int main(int argc, char *argv[]) {
-    int num_threads = 0;
-    char *command_string = NULL;
-
-    // Parse arguments
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-n") == 0 && i + 1 < argc) {
-            num_threads = atoi(argv[++i]);
-        } else if (strcmp(argv[i], "-c") == 0 && i + 1 < argc) {
-            command_string = argv[++i];
-        } else {
-            print_usage();
-            return 1;
-        }
-    }
-
-    if (num_threads <= 0 || command_string == NULL) {
-        print_usage();
-        return 1;
-    }
-
-    // Split command string by "->"
     char *commands[MAX_COMMANDS];
     int command_count = 0;
-
     char *token = strtok(command_string, "->");
     while (token != NULL && command_count < MAX_COMMANDS) {
         commands[command_count++] = trim(token);
         token = strtok(NULL, "->");
     }
 
-    // Debug output
-    printf("Number of threads: %d\n", num_threads);
-    printf("Commands:\n");
-    for (int i = 0; i < command_count; i++) {
-        printf("  [%d] %s\n", i, commands[i]);
-    }
-
-    // Prepare and launch threads
     pthread_t threads[num_threads];
     ThreadData thread_data[num_threads];
 
@@ -187,11 +132,10 @@ int main(int argc, char *argv[]) {
         pthread_create(&threads[i], NULL, worker_thread, &thread_data[i]);
     }
 
-    // Join threads
     for (int i = 0; i < num_threads; i++) {
         pthread_join(threads[i], NULL);
     }
 
-
-    // We’ll implement thread/process logic next
+    free(command_string);
+    return 0;
 }
